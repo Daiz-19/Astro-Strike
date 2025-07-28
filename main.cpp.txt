@@ -1,0 +1,858 @@
+#include <GLUT/glut.h>
+#include <cstdlib>
+#include <ctime>
+#include <cmath>
+#include <vector>
+#include <string>
+#include <sstream>   // For converting numbers to strings
+#include <algorithm> // For std::remove_if
+#include <iostream>  // For potential debugging
+
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
+// Window size
+const int WIDTH = 800;
+const int HEIGHT = 600;
+
+// Game states
+enum GameState { START, PLAYING, GAMEOVER };
+GameState gameState = START;
+
+// Spaceship data
+float shipX = WIDTH / 2.0f;
+float shipY = 70.0f;
+float shipSpeed = 10.0f;
+float shipSize = 15.0f;
+
+// Bullet structure
+struct Bullet {
+    float x, y;
+    bool active;
+    float speed;
+    float size;
+};
+std::vector<Bullet> bullets;
+const int MAX_BULLETS_ON_SCREEN = 10; // Max bullets player can have on screen
+float bulletSpeed = 15.0f;
+float bulletSize = 3.0f;
+
+// Asteroid structure
+struct Asteroid {
+    float x, y;
+    float speed;
+    float size;
+    float angle;
+    float rotationSpeed;
+    int sides;
+    std::vector<std::pair<float, float>> shapeOffsets;
+    bool active;
+
+    // Boss properties
+    bool isBoss;
+    int health;
+    int maxHealth;
+};
+std::vector<Asteroid> asteroids;
+const int INITIAL_ASTEROIDS_PER_LEVEL = 5;
+const int MAX_ASTEROIDS_ON_SCREEN = 15; // Max normal asteroids
+float minAsteroidSpeed = 0.5f;
+float maxAsteroidSpeed = 2.0f;
+float minAsteroidSize = 15.0f;
+float maxAsteroidSize = 40.0f;
+
+// Boss state
+bool bossIsActive = false;
+const int BOSS_BASE_HEALTH = 5;
+const float BOSS_SIZE_MULTIPLIER = 2.0f;
+const int POINTS_PER_BOSS_HIT = 25;
+const int POINTS_PER_BOSS_DEFEAT_BASE = 200;
+
+// Explosion structure
+struct ExplosionParticle {
+    float x, y;
+    float dx, dy;
+    float lifespan;
+    float r, g, b;
+};
+std::vector<ExplosionParticle> explosionParticles;
+
+// Score and lives
+int score = 0;
+int lives = 3;
+int level = 1;
+int asteroidsToNextLevelCount;
+int asteroidsDestroyedThisLevel = 0;
+
+// Timing
+int bulletCooldown = 0;
+const int BULLET_COOLDOWN_MAX = 8; // Lower is faster shooting
+
+// Starfield
+struct Star {
+    float x, y;
+    float size;
+    float brightness;
+};
+std::vector<Star> stars;
+const int NUM_STARS = 150;
+
+// Power-up Type
+enum PowerUpType {
+    DOUBLE_SHOT
+};
+
+// Power-up structure (for the item that falls)
+struct PowerUpItem {
+    float x, y;
+    PowerUpType type;
+    float size;
+    float speed;
+    bool active;
+    float r, g, b;
+    std::string displayText;
+};
+std::vector<PowerUpItem> powerUpItems;
+
+// Player's current power-up state
+bool playerHasDoubleShot = false;
+const int DOUBLE_SHOT_BULLET_OFFSET = 10; // Horizontal offset for the two bullets
+
+// Function Prototypes
+void initGame();
+void update(int value);
+void display();
+void reshape(int w, int h);
+void keyboard(unsigned char key, int x, int y);
+void specialKeys(int key, int x, int y);
+void drawText(float x, float y, const std::string &text, void* font = GLUT_BITMAP_HELVETICA_18);
+void createAsteroid(bool atTop = true, bool makeBoss = false);
+void createExplosion(float x, float y, float asteroidSize);
+void startNextLevel();
+void spawnPowerUp(float x, float y, PowerUpType type);
+void drawPowerUpItem(const PowerUpItem &pItem);
+
+
+// Utility function to generate random float
+float randomFloat(float min, float max) {
+    if (min >= max) return min;
+    return min + static_cast<float>(rand()) / (static_cast<float>(RAND_MAX / (max - min)));
+}
+
+// Initialize starfield
+void initStars() {
+    stars.clear();
+    for (int i = 0; i < NUM_STARS; ++i) {
+        Star s;
+        s.x = randomFloat(0, WIDTH);
+        s.y = randomFloat(0, HEIGHT);
+        s.size = randomFloat(0.5f, 2.0f);
+        s.brightness = randomFloat(0.3f, 1.0f);
+        stars.push_back(s);
+    }
+}
+
+// Initialize game variables
+void initGame() {
+    shipX = WIDTH / 2.0f;
+    shipY = 70.0f;
+    lives = 3;
+    score = 0;
+    level = 1;
+
+    bullets.clear();
+    asteroids.clear();
+    explosionParticles.clear();
+    powerUpItems.clear(); // Clear any active power-up items
+
+    playerHasDoubleShot = false; // Reset player's power-up status
+
+    bossIsActive = false;
+    asteroidsDestroyedThisLevel = 0; // Reset for level 1
+    startNextLevel();
+
+    initStars();
+    gameState = START;
+}
+
+// Setup for the start of a new level (or game start)
+void startNextLevel() {
+    asteroidsDestroyedThisLevel = 0;
+    asteroidsToNextLevelCount = INITIAL_ASTEROIDS_PER_LEVEL + (level - 1) * 2;
+    bossIsActive = false;
+
+    // Clear any existing non-boss asteroids
+    asteroids.erase(std::remove_if(asteroids.begin(), asteroids.end(), [](const Asteroid& ast){ return !ast.isBoss; }), asteroids.end());
+
+    // If a boss was somehow active and we are starting a new level (e.g. from game over), clear it.
+    if (!asteroids.empty() && asteroids[0].isBoss) { // Assuming boss is at the front if it exists
+        asteroids.clear();
+    }
+
+    // Spawn initial set of normal asteroids for the new level
+    int currentNormalAsteroids = 0;
+    for(const auto& ast : asteroids) {
+        if (!ast.isBoss) currentNormalAsteroids++;
+    }
+
+    for (int i = currentNormalAsteroids; i < INITIAL_ASTEROIDS_PER_LEVEL; ++i) {
+        if (asteroids.size() < MAX_ASTEROIDS_ON_SCREEN + (bossIsActive ? 0 : 1)) {
+             createAsteroid(true, false);
+        }
+    }
+}
+
+// Create a single asteroid (can be normal or boss)
+void createAsteroid(bool atTop, bool makeBoss) {
+    if (!makeBoss && asteroids.size() >= MAX_ASTEROIDS_ON_SCREEN) return;
+    if (makeBoss && bossIsActive) return;
+
+    Asteroid a;
+    a.isBoss = makeBoss;
+
+    if (makeBoss) {
+        a.x = WIDTH / 2.0f;
+        a.y = HEIGHT + maxAsteroidSize * BOSS_SIZE_MULTIPLIER;
+        a.size = maxAsteroidSize * BOSS_SIZE_MULTIPLIER;
+        a.speed = minAsteroidSpeed * 0.5f + (level * 0.05f);
+        if (a.speed > maxAsteroidSpeed * 0.75f) a.speed = maxAsteroidSpeed * 0.75f;
+        a.maxHealth = BOSS_BASE_HEALTH + (level -1) * 2;
+        a.health = a.maxHealth;
+        a.rotationSpeed = randomFloat(-0.5f, 0.5f);
+        bossIsActive = true;
+        asteroids.erase(std::remove_if(asteroids.begin(), asteroids.end(),
+            [](const Asteroid& ast){ return !ast.isBoss && ast.active; }
+        ), asteroids.end());
+    } else { // Normal asteroid
+        a.x = randomFloat(0, WIDTH);
+        if (atTop) {
+            a.y = HEIGHT + randomFloat(50, 200);
+        } else {
+            if (rand() % 2 == 0) {
+                a.x = (rand() % 2 == 0) ? -randomFloat(50,100) : WIDTH + randomFloat(50,100);
+                a.y = randomFloat(HEIGHT * 0.3f, HEIGHT * 0.9f);
+            } else {
+                a.y = (rand() % 4 == 0) ? -randomFloat(50,100) : HEIGHT + randomFloat(50,100);
+                 a.x = randomFloat(0, WIDTH);
+            }
+        }
+        a.speed = randomFloat(minAsteroidSpeed + (level-1)*0.15f, maxAsteroidSpeed + (level-1)*0.25f);
+        if (a.speed > maxAsteroidSpeed * 1.5f) a.speed = maxAsteroidSpeed * 1.5f;
+        a.size = randomFloat(minAsteroidSize, maxAsteroidSize);
+        a.health = 1;
+        a.maxHealth = 1;
+        a.rotationSpeed = randomFloat(-2.0f, 2.0f);
+    }
+
+    a.angle = randomFloat(0, 360);
+    a.sides = makeBoss ? 10 + (rand() % 5) : 6 + (rand() % 5);
+    a.active = true;
+
+    a.shapeOffsets.clear();
+    for (int i = 0; i < a.sides; ++i) {
+        float angle_rad = (2.0f * M_PI / a.sides) * i;
+        float offset_dist = randomFloat(makeBoss ? 0.8f : 0.7f, 1.1f);
+        a.shapeOffsets.push_back({cos(angle_rad) * offset_dist, sin(angle_rad) * offset_dist});
+    }
+
+    if (makeBoss) {
+        asteroids.erase(std::remove_if(asteroids.begin(), asteroids.end(), [](const Asteroid& ast){ return ast.isBoss; }), asteroids.end());
+        asteroids.insert(asteroids.begin(), a);
+    } else {
+        asteroids.push_back(a);
+    }
+}
+
+// Create explosion particles
+void createExplosion(float x, float y, float baseSize) {
+    int numParticles = 10 + static_cast<int>(baseSize / 2.0f);
+    numParticles = std::min(numParticles, 100);
+    for (int i = 0; i < numParticles; ++i) {
+        ExplosionParticle p;
+        p.x = x;
+        p.y = y;
+        float angle = randomFloat(0, 2.0f * M_PI);
+        float speed = randomFloat(1.0f, 5.0f);
+        p.dx = cos(angle) * speed;
+        p.dy = sin(angle) * speed;
+        p.lifespan = randomFloat(30.0f, 70.0f);
+        p.r = randomFloat(0.8f, 1.0f);
+        p.g = randomFloat(0.3f, 0.7f);
+        p.b = randomFloat(0.0f, 0.2f);
+        explosionParticles.push_back(p);
+    }
+}
+
+// Function to spawn a power-up item
+void spawnPowerUp(float x, float y, PowerUpType type) {
+    PowerUpItem newItem;
+    newItem.x = x;
+    newItem.y = y;
+    newItem.type = type;
+    newItem.size = 18.0f;
+    newItem.speed = randomFloat(1.0f, 1.5f);
+    newItem.active = true;
+
+    switch (type) {
+        case DOUBLE_SHOT:
+            newItem.r = 0.1f; newItem.g = 0.9f; newItem.b = 0.1f;
+            newItem.displayText = "D";
+            break;
+    }
+    powerUpItems.push_back(newItem);
+}
+
+
+// Draw functions
+void drawText(float x, float y, const std::string &text, void* font) {
+    glRasterPos2f(x, y);
+    for (char c : text) {
+        glutBitmapCharacter(font, c);
+    }
+}
+
+void drawStars() {
+    for (size_t i = 0; i < stars.size(); ++i) {
+        if (rand() % 100 < 2) {
+            stars[i].brightness = randomFloat(0.2f, 1.0f);
+        }
+        glColor3f(stars[i].brightness, stars[i].brightness, stars[i].brightness);
+        glPointSize(stars[i].size);
+        glBegin(GL_POINTS);
+        glVertex2f(stars[i].x, stars[i].y);
+        glEnd();
+    }
+}
+
+void drawShip() {
+    float bodyR = 0.3f, bodyG = 0.7f, bodyB = 0.9f;
+    float accentR = 0.9f, accentG = 0.9f, accentB = 1.0f;
+    float engineR = 1.0f, engineG = 0.5f, engineB = 0.2f;
+
+    glPushMatrix();
+    glTranslatef(shipX, shipY, 0);
+
+    glColor3f(bodyR, bodyG, bodyB);
+    glBegin(GL_POLYGON);
+    glVertex2f(0, shipSize * 1.2f);
+    glVertex2f(-shipSize * 0.4f, shipSize * 0.2f);
+    glVertex2f(-shipSize * 0.7f, -shipSize * 0.5f);
+    glVertex2f(-shipSize * 0.3f, -shipSize * 0.8f);
+    glVertex2f(shipSize * 0.3f, -shipSize * 0.8f);
+    glVertex2f(shipSize * 0.7f, -shipSize * 0.5f);
+    glVertex2f(shipSize * 0.4f, shipSize * 0.2f);
+    glEnd();
+
+    glColor3f(accentR, accentG, accentB);
+    glBegin(GL_POLYGON);
+    glVertex2f(0, shipSize * 0.8f);
+    glVertex2f(-shipSize * 0.25f, shipSize * 0.3f);
+    glVertex2f(shipSize * 0.25f, shipSize * 0.3f);
+    glEnd();
+
+    glColor3f(engineR, engineG, engineB);
+    glBegin(GL_TRIANGLES);
+    glVertex2f(-shipSize * 0.25f, -shipSize * 0.7f);
+    glVertex2f(shipSize * 0.25f, -shipSize * 0.7f);
+    glVertex2f(0, -shipSize * 1.1f);
+    glEnd();
+
+    glColor3f(bodyR * 0.8f, bodyG * 0.8f, bodyB * 0.8f);
+    glBegin(GL_TRIANGLES);
+    glVertex2f(-shipSize * 0.6f, -shipSize * 0.3f);
+    glVertex2f(-shipSize * 0.9f, -shipSize * 0.6f);
+    glVertex2f(-shipSize * 0.5f, -shipSize * 0.6f);
+
+    glVertex2f(shipSize * 0.6f, -shipSize * 0.3f);
+    glVertex2f(shipSize * 0.9f, -shipSize * 0.6f);
+    glVertex2f(shipSize * 0.5f, -shipSize * 0.6f);
+    glEnd();
+
+    glPopMatrix();
+}
+
+void drawBullet(const Bullet &b) {
+    glColor3f(1.0f, 0.9f, 0.0f);
+    glBegin(GL_QUADS);
+    glVertex2f(b.x - b.size / 2, b.y - b.size * 2);
+    glVertex2f(b.x + b.size / 2, b.y - b.size * 2);
+    glVertex2f(b.x + b.size / 2, b.y + b.size * 2);
+    glVertex2f(b.x - b.size / 2, b.y + b.size * 2);
+    glEnd();
+}
+
+void drawAsteroid(const Asteroid &a) {
+    if (a.isBoss) {
+        float healthPercentage = static_cast<float>(a.health) / a.maxHealth;
+        glColor3f(0.5f + 0.4f * (1.0f-healthPercentage) , 0.1f, 0.1f);
+    } else {
+        glColor3f(0.35f, 0.25f, 0.15f);
+    }
+
+    glPushMatrix();
+    glTranslatef(a.x, a.y, 0);
+    glRotatef(a.angle, 0, 0, 1);
+
+    glBegin(GL_POLYGON);
+    for(const auto& offset : a.shapeOffsets) {
+        glVertex2f(offset.first * a.size, offset.second * a.size);
+    }
+    glEnd();
+
+    if (a.isBoss) {
+        glColor3f(0.3f, 0.05f, 0.05f);
+    } else {
+        glColor3f(0.2f, 0.15f, 0.1f);
+    }
+    for(size_t i = 0; i < a.shapeOffsets.size(); ++i) {
+        if (i % (a.isBoss ? 1 : 2) == 0) {
+            glBegin(GL_TRIANGLE_FAN);
+            glVertex2f(a.shapeOffsets[i].first * a.size * 0.6f, a.shapeOffsets[i].second * a.size * 0.6f);
+            for(int k=0; k <= 6; ++k) {
+                float cr_angle = k * 2.0f * M_PI / 6.0f;
+                float craterSize = a.isBoss ? 0.20f : 0.15f;
+                glVertex2f(a.shapeOffsets[i].first * a.size * 0.6f + cos(cr_angle) * a.size * craterSize,
+                           a.shapeOffsets[i].second * a.size * 0.6f + sin(cr_angle) * a.size * craterSize);
+            }
+            glEnd();
+        }
+    }
+    glPopMatrix();
+
+    if (a.isBoss && a.active) {
+        float barWidth = a.size * 1.5f;
+        float barHeight = 10.0f;
+        float barX = a.x - barWidth / 2;
+        float barY = a.y + a.size + 15.0f;
+
+        glColor3f(0.2f, 0.2f, 0.2f);
+        glBegin(GL_QUADS);
+        glVertex2f(barX, barY);
+        glVertex2f(barX + barWidth, barY);
+        glVertex2f(barX + barWidth, barY + barHeight);
+        glVertex2f(barX, barY + barHeight);
+        glEnd();
+
+        float healthPercentage = static_cast<float>(a.health) / a.maxHealth;
+        glColor3f(1.0f - healthPercentage, healthPercentage, 0.0f);
+        glBegin(GL_QUADS);
+        glVertex2f(barX, barY);
+        glVertex2f(barX + barWidth * healthPercentage, barY);
+        glVertex2f(barX + barWidth * healthPercentage, barY + barHeight);
+        glVertex2f(barX, barY + barHeight);
+        glEnd();
+    }
+}
+
+void drawExplosionParticles() {
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+    glPointSize(2.5f);
+    glBegin(GL_POINTS);
+    for (const auto& p : explosionParticles) {
+        glColor4f(p.r, p.g, p.b, p.lifespan / 70.0f);
+        glVertex2f(p.x, p.y);
+    }
+    glEnd();
+    glDisable(GL_BLEND);
+}
+
+void drawPowerUpItem(const PowerUpItem &pItem) {
+    if (!pItem.active) return;
+
+    glPushMatrix();
+    glTranslatef(pItem.x, pItem.y, 0);
+
+    glColor3f(pItem.r, pItem.g, pItem.b);
+    glBegin(GL_QUADS);
+    glVertex2f(-pItem.size / 2, -pItem.size / 2);
+    glVertex2f( pItem.size / 2, -pItem.size / 2);
+    glVertex2f( pItem.size / 2,  pItem.size / 2);
+    glVertex2f(-pItem.size / 2,  pItem.size / 2);
+    glEnd();
+
+    glColor3f(pItem.r * 0.7f, pItem.g * 0.7f, pItem.b * 0.7f);
+    glLineWidth(2.0f);
+    glBegin(GL_LINE_LOOP);
+    glVertex2f(-pItem.size / 2, -pItem.size / 2);
+    glVertex2f( pItem.size / 2, -pItem.size / 2);
+    glVertex2f( pItem.size / 2,  pItem.size / 2);
+    glVertex2f(-pItem.size / 2,  pItem.size / 2);
+    glEnd();
+    glLineWidth(1.0f);
+
+    if (!pItem.displayText.empty()) {
+        glColor3f(1.0f, 1.0f, 1.0f);
+
+        float textXOffset = 0;
+        for (size_t i = 0; i < pItem.displayText.length(); ++i) {
+            textXOffset -= glutBitmapWidth(GLUT_BITMAP_HELVETICA_12, pItem.displayText[i]);
+        }
+        textXOffset /= 2.0f;
+
+        // For GLUT_BITMAP_HELVETICA_12, nominal height is 12.
+        float textYOffset = -12.0f / 2.0f + 2.0f; // Approx. -4.0f for vertical centering
+
+        glRasterPos2f(textXOffset, textYOffset);
+        for (char c : pItem.displayText) {
+            glutBitmapCharacter(GLUT_BITMAP_HELVETICA_12, c);
+        }
+    }
+    glPopMatrix();
+}
+
+
+void drawUI() {
+    glColor3f(1.0f, 1.0f, 1.0f);
+
+    std::stringstream ssScore;
+    ssScore << "Score: " << score;
+    drawText(10, HEIGHT - 25, ssScore.str(), GLUT_BITMAP_HELVETICA_18);
+
+    std::stringstream ssLives;
+    ssLives << "Lives: " << lives;
+    drawText(WIDTH - 100, HEIGHT - 25, ssLives.str(), GLUT_BITMAP_HELVETICA_18);
+
+    std::stringstream ssLevel;
+    ssLevel << "Level: " << level;
+    drawText(WIDTH/2.0f - 40, HEIGHT - 25, ssLevel.str(), GLUT_BITMAP_HELVETICA_18);
+
+    if (bossIsActive && !asteroids.empty() && asteroids[0].isBoss) {
+        drawText(WIDTH/2.0f - 70, HEIGHT - 50, "!! BOSS BATTLE !!", GLUT_BITMAP_TIMES_ROMAN_24);
+    }
+    if (playerHasDoubleShot) {
+        drawText(10, HEIGHT - 50, "DOUBLE SHOT!", GLUT_BITMAP_HELVETICA_18);
+    }
+
+
+    if (gameState == START) {
+        drawText(WIDTH / 2.0f - 120, HEIGHT / 2.0f + 20, "PLANET DEFENDER", GLUT_BITMAP_TIMES_ROMAN_24);
+        drawText(WIDTH / 2.0f - 80, HEIGHT / 2.0f - 20, "Press 'S' to Start", GLUT_BITMAP_HELVETICA_18);
+        drawText(WIDTH / 2.0f - 150, HEIGHT / 2.0f - 50, "Arrow Keys to Move, Space to Shoot", GLUT_BITMAP_HELVETICA_18);
+    } else if (gameState == GAMEOVER) {
+        drawText(WIDTH / 2.0f - 70, HEIGHT / 2.0f + 50, "GAME OVER", GLUT_BITMAP_TIMES_ROMAN_24);
+        std::stringstream ssFinalScore;
+        ssFinalScore << "Final Score: " << score;
+        drawText(WIDTH / 2.0f - 80, HEIGHT / 2.0f + 10, ssFinalScore.str(), GLUT_BITMAP_HELVETICA_18);
+        drawText(WIDTH / 2.0f - 90, HEIGHT / 2.0f - 30, "Press 'R' to Restart", GLUT_BITMAP_HELVETICA_18);
+    }
+}
+
+// Display callback
+void display() {
+    glClear(GL_COLOR_BUFFER_BIT);
+    glLoadIdentity();
+
+    drawStars();
+
+    if (gameState == PLAYING || gameState == START || gameState == GAMEOVER) {
+        if (gameState != GAMEOVER || lives > 0) {
+             drawShip();
+        }
+        for (const auto &b : bullets) {
+            if (b.active)
+                drawBullet(b);
+        }
+        for (const auto &a : asteroids) {
+            if (a.active)
+                drawAsteroid(a);
+        }
+         for (const auto &pItem : powerUpItems) {
+            if (pItem.active) {
+                drawPowerUpItem(pItem);
+            }
+        }
+        drawExplosionParticles();
+    }
+
+    drawUI();
+
+    glutSwapBuffers();
+}
+
+// Update game logic
+void update(int value) {
+    if (gameState == PLAYING) {
+        if (bulletCooldown > 0) {
+            bulletCooldown--;
+        }
+
+        // Update bullets
+        for (auto &b : bullets) {
+            if (b.active) {
+                b.y += b.speed;
+                if (b.y > HEIGHT + b.size) {
+                    b.active = false;
+                }
+            }
+        }
+        bullets.erase(std::remove_if(bullets.begin(), bullets.end(), [](const Bullet& b){ return !b.active; }), bullets.end());
+
+        // Update asteroids
+        for (auto &a : asteroids) {
+            if (a.active) {
+                a.y -= a.speed;
+                a.angle += a.rotationSpeed;
+                if (a.angle > 360.0f) a.angle -= 360.0f;
+                if (a.angle < 0.0f) a.angle += 360.0f;
+
+                if (!a.isBoss && a.y < -a.size * 2) {
+                    a.active = false;
+                }
+                if (a.isBoss && a.y < -a.size * 2) {
+                    bossIsActive = false;
+                    a.active = false;
+                    level++;
+                    startNextLevel();
+                }
+            }
+        }
+
+        int activeNormalAsteroids = 0;
+        for(const auto& ast : asteroids) {
+            if (ast.active && !ast.isBoss) activeNormalAsteroids++;
+        }
+
+        if (!bossIsActive && activeNormalAsteroids < (INITIAL_ASTEROIDS_PER_LEVEL + (level-1)/2) && asteroids.size() < MAX_ASTEROIDS_ON_SCREEN) {
+            if (rand() % 100 < 2) {
+                createAsteroid(true, false);
+            }
+        }
+
+
+        // Collision detection: Bullets vs Asteroids
+        for (auto &b : bullets) {
+            if (b.active) {
+                for (auto &a : asteroids) {
+                    if (a.active) {
+                        float dx = b.x - a.x;
+                        float dy = b.y - a.y;
+                        float distance = sqrt(dx * dx + dy * dy);
+                        if (distance < a.size + b.size) {
+                            b.active = false;
+
+                            if (a.isBoss) {
+                                a.health--;
+                                score += POINTS_PER_BOSS_HIT;
+                                createExplosion(b.x, b.y, a.size * 0.2f);
+                                if (a.health <= 0) {
+                                    a.active = false;
+                                    score += POINTS_PER_BOSS_DEFEAT_BASE * level;
+                                    createExplosion(a.x, a.y, a.size * 1.5f);
+                                    bossIsActive = false;
+
+                                    spawnPowerUp(a.x, a.y, DOUBLE_SHOT);
+
+                                    level++;
+                                    startNextLevel();
+                                }
+                            } else {
+                                a.active = false;
+                                score += static_cast<int>( (50 - a.size) < 10 ? 10 : (50 - a.size) + level * 5 );
+                                asteroidsDestroyedThisLevel++;
+                                createExplosion(a.x, a.y, a.size);
+                            }
+                            goto next_bullet;
+                        }
+                    }
+                }
+            }
+            next_bullet:;
+        }
+
+        asteroids.erase(std::remove_if(asteroids.begin(), asteroids.end(), [](const Asteroid& ast){ return !ast.active; }), asteroids.end());
+
+        // Update Power-up Items
+        for (auto &pItem : powerUpItems) {
+            if (pItem.active) {
+                pItem.y -= pItem.speed;
+
+                if (pItem.y < -pItem.size) {
+                    pItem.active = false;
+                }
+
+                float dx_ship_pow = shipX - pItem.x;
+                float dy_ship_pow = shipY - pItem.y;
+                float dist_ship_pow = sqrt(dx_ship_pow * dx_ship_pow + dy_ship_pow * dy_ship_pow);
+
+                if (dist_ship_pow < pItem.size + shipSize * 0.7f) {
+                    pItem.active = false;
+                    createExplosion(pItem.x, pItem.y, pItem.size * 1.5f);
+
+                    if (pItem.type == DOUBLE_SHOT) {
+                        playerHasDoubleShot = true;
+                    }
+                }
+            }
+        }
+        powerUpItems.erase(std::remove_if(powerUpItems.begin(), powerUpItems.end(),
+            [](const PowerUpItem& pi){ return !pi.active; }),
+            powerUpItems.end());
+
+
+        // Collision detection: Ship vs Asteroids
+        for (auto &a : asteroids) {
+            if (a.active) {
+                float dx = shipX - a.x;
+                float dy = shipY - a.y;
+                float distance = sqrt(dx * dx + dy * dy);
+                if (distance < a.size + shipSize * 0.8f) {
+                    lives--;
+                    playerHasDoubleShot = false;
+                    createExplosion(shipX, shipY, shipSize*2);
+                    createExplosion(a.x, a.y, a.size);
+
+                    shipX = WIDTH / 2.0f;
+                    shipY = 70.0f;
+
+                    if (!a.isBoss) {
+                        a.active = false;
+                    }
+
+                    if (lives <= 0) {
+                        gameState = GAMEOVER;
+                        break;
+                    }
+                }
+            }
+        }
+        if (gameState == PLAYING) {
+             asteroids.erase(std::remove_if(asteroids.begin(), asteroids.end(), [](const Asteroid& ast){ return !ast.active; }), asteroids.end());
+        }
+
+
+        // Update explosion particles
+        for (auto &p : explosionParticles) {
+            p.x += p.dx;
+            p.y += p.dy;
+            p.lifespan -= 1.0f;
+        }
+        explosionParticles.erase(std::remove_if(explosionParticles.begin(), explosionParticles.end(),
+            [](const ExplosionParticle& p){ return p.lifespan <= 0; }),
+            explosionParticles.end());
+
+        if (!bossIsActive && asteroidsDestroyedThisLevel >= asteroidsToNextLevelCount && gameState == PLAYING) {
+            createAsteroid(true, true);
+        }
+    }
+
+    glutPostRedisplay();
+    glutTimerFunc(16, update, 0);
+}
+
+// Keyboard input processing
+void keyboard(unsigned char key, int x, int y) {
+    switch (gameState) {
+        case START:
+            if (key == 's' || key == 'S') {
+                if (lives > 0) {
+                    gameState = PLAYING;
+                } else {
+                    initGame();
+                    gameState = PLAYING;
+                }
+            }
+            break;
+        case PLAYING:
+            if (key == ' ') {
+                if (bulletCooldown <= 0) {
+                    int bulletsToFire = playerHasDoubleShot ? 2 : 1;
+                    int bulletsPossible = MAX_BULLETS_ON_SCREEN - bullets.size();
+
+                    if (bulletsToFire == 2 && bulletsPossible >= 2) {
+                        Bullet newBullet1;
+                        newBullet1.x = shipX - DOUBLE_SHOT_BULLET_OFFSET;
+                        newBullet1.y = shipY + shipSize * 0.8f;
+                        newBullet1.active = true;
+                        newBullet1.speed = bulletSpeed;
+                        newBullet1.size = bulletSize;
+                        bullets.push_back(newBullet1);
+
+                        Bullet newBullet2;
+                        newBullet2.x = shipX + DOUBLE_SHOT_BULLET_OFFSET;
+                        newBullet2.y = shipY + shipSize * 0.8f;
+                        newBullet2.active = true;
+                        newBullet2.speed = bulletSpeed;
+                        newBullet2.size = bulletSize;
+                        bullets.push_back(newBullet2);
+                        bulletCooldown = BULLET_COOLDOWN_MAX;
+                    } else if (bulletsPossible >= 1) {
+                        Bullet newBullet;
+                        newBullet.x = shipX;
+                        newBullet.y = shipY + shipSize * 0.8f;
+                        newBullet.active = true;
+                        newBullet.speed = bulletSpeed;
+                        newBullet.size = bulletSize;
+                        bullets.push_back(newBullet);
+                        bulletCooldown = BULLET_COOLDOWN_MAX;
+                    }
+                }
+            }
+            break;
+        case GAMEOVER:
+            if (key == 'r' || key == 'R') {
+                initGame();
+            }
+            break;
+    }
+    if (key == 27) {
+        exit(0);
+    }
+}
+
+// Special key input processing (arrow keys)
+void specialKeys(int key, int x, int y) {
+    if (gameState == PLAYING) {
+        switch (key) {
+            case GLUT_KEY_LEFT:
+                shipX -= shipSpeed;
+                if (shipX < shipSize) shipX = shipSize;
+                break;
+            case GLUT_KEY_RIGHT:
+                shipX += shipSpeed;
+                if (shipX > WIDTH - shipSize) shipX = WIDTH - shipSize;
+                break;
+        }
+    }
+}
+
+
+// Reshape function (called when window is resized)
+void reshape(int w, int h) {
+    if (h == 0) h = 1;
+    glViewport(0, 0, w, h);
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    gluOrtho2D(0, WIDTH, 0, HEIGHT);
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+}
+
+// Main function
+int main(int argc, char** argv) {
+    srand(static_cast<unsigned int>(time(nullptr)));
+
+    glutInit(&argc, argv);
+    glutInitDisplayMode(GLUT_DOUBLE | GLUT_RGB | GLUT_ALPHA);
+    glutInitWindowSize(WIDTH, HEIGHT);
+    glutInitWindowPosition(100, 100);
+    glutCreateWindow("Space Defender");
+
+    glClearColor(0.0f, 0.0f, 0.05f, 1.0f);
+
+    initGame();
+
+    glutDisplayFunc(display);
+    glutReshapeFunc(reshape);
+    glutKeyboardFunc(keyboard);
+    glutSpecialFunc(specialKeys);
+    glutTimerFunc(16, update, 0);
+
+    glEnable(GL_BLEND);
+    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
+
+
+    glutMainLoop();
+    return 0;
+}
